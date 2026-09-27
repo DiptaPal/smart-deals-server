@@ -3,13 +3,50 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 const express = require("express");
 const cors = require("cors");
+const { initializeApp, cert } = require("firebase-admin/app");
+const { getAuth } = require("firebase-admin/auth");
+
+
 const app = express();
 
 const port = process.env.PORT || 3000;
 
+
+const serviceAccount = require("./smart-deals-firebase-admin-key.json");
+
+initializeApp({
+    credential: cert(serviceAccount)
+});
+
+
 // middleware
 app.use(cors());
 app.use(express.json());
+
+// const logger = (req, res, next) => {
+
+//     next();
+// }
+
+const verifyFireBaseToken = async(req, res, next) => {
+    if(!req.headers.authorization){
+        return res.status(401).send({message: "unauthorized access"});
+    }
+
+    const token = req.headers.authorization.split(" ")[1];
+    if(!token){
+        return res.status(401).send({message: "unauthorized access"});
+    }
+
+    try {
+        const userInfo = await getAuth().verifyIdToken(token);
+        req.token_email = userInfo.email;
+        next();
+    } catch (error) {
+        return res.status(401).send({message: "unauthorized access"});
+    }
+
+}
 
 const uri = process.env.MONGODB_URL;
 
@@ -84,7 +121,7 @@ async function startServer(){
         });
 
         // get my products
-        app.get("/my-products", async(req, res) => {
+        app.get("/my-products", verifyFireBaseToken, async(req, res) => {
 
             const email = req.query.email;
             const query = {};
@@ -146,7 +183,7 @@ async function startServer(){
         })
 
         // delete product
-        app.delete("/products/:id", async(req, res) => {
+        app.delete("/products/:id",verifyFireBaseToken, async(req, res) => {
             const id = req.params.id;
             const query = {_id: new ObjectId(id)};
 
@@ -242,57 +279,61 @@ async function startServer(){
         });
 
         // get bids base on user
-        app.get("/my-bids/:email", async(req, res) => {
+        app.get("/my-bids/:email", verifyFireBaseToken, async(req, res) => {
             const userEmail = req.params.email;
-            const result = await bidsCollection.aggregate([
-                {
-                    $match: {
-                        buyer_email: userEmail
-                    }
-                },
-                {
-                    $lookup: {
-                        from: "products",
-                        let: {
-                            productId: {
-                                $toObjectId: "$product_id"
-                            }
-                        },
-                        pipeline: [
-                            {
-                                $match: {
-                                    $expr: {
-                                        $eq: ["$_id", "$$productId"]
+            if(userEmail !== req.token_email){
+                return res.status(403).send({message: "forbidden access"})
+            } else{
+                const result = await bidsCollection.aggregate([
+                    {
+                        $match: {
+                            buyer_email: userEmail
+                        }
+                    },
+                    {
+                        $lookup: {
+                            from: "products",
+                            let: {
+                                productId: {
+                                    $toObjectId: "$product_id"
+                                }
+                            },
+                            pipeline: [
+                                {
+                                    $match: {
+                                        $expr: {
+                                            $eq: ["$_id", "$$productId"]
+                                        }
                                     }
                                 }
-                            }
-                        ],
-                        as: "product"
+                            ],
+                            as: "product"
+                        }
+                    },
+                    {
+                        $unwind: "$product"
+                    },
+                    {
+                    $project: {
+                            _id: 1,
+                            product_id: 1,
+                            buyer_name: 1,
+                            buyer_email: 1,
+                            buyer_image: 1,
+                            bid_price: 1,
+                            status: 1,
+
+                            product_name: "$product.title",
+                            price_max: "$product.price_max",
+                            price_min: "$product.price_min",
+                            product_image: "$product.product_image"
+
+                    } 
                     }
-                },
-                {
-                    $unwind: "$product"
-                },
-                {
-                   $project: {
-                        _id: 1,
-                        product_id: 1,
-                        buyer_name: 1,
-                        buyer_email: 1,
-                        buyer_image: 1,
-                        bid_price: 1,
-                        status: 1,
+                ]).toArray();
 
-                        product_name: "$product.title",
-                        price_max: "$product.price_max",
-                        price_min: "$product.price_min",
-                        product_image: "$product.product_image"
-
-                   } 
-                }
-            ]).toArray();
-
-            res.send(result);
+                res.send(result);
+            }
         });
 
         // delete a bid
